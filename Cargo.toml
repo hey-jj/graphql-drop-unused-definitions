@@ -8,3 +8,7 @@ repository = "https://github.com/hey-jj/graphql-drop-unused-definitions"
 readme = "README.md"
 
 [dependencies]
+# Parses GraphQL executable documents and renders them back. Its Display output
+# matches the formatting the tests assert: two-space indent, blank line between
+# definitions, anonymous-operation shorthand.
+graphql-parser = "0.4"
