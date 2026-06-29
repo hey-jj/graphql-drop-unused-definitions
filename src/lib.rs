@@ -33,18 +33,32 @@
 use std::collections::{HashMap, HashSet};
 
 use graphql_parser::query::{
-    Definition, Document as RawDocument, OperationDefinition, ParseError, Selection, SelectionSet,
+    Definition, Document as RawDocument, OperationDefinition, Selection, SelectionSet, Value,
 };
+
+pub use graphql_parser::query::ParseError;
 
 /// A parsed GraphQL document.
 ///
 /// This is an owned tree, so it carries no borrows from the source text and can
 /// be returned and stored freely.
+///
+/// The alias resolves to `graphql_parser::query::Document<'static, String>`.
+/// Inspecting or building a [`Document`] beyond passing it back into this crate
+/// needs `graphql-parser` as a direct dependency, pinned to the version this
+/// crate uses. [`parse`] and [`print`] cover the round trip without that.
 pub type Document = RawDocument<'static, String>;
 
 /// Parse GraphQL source into a [`Document`].
 ///
-/// Returns a [`ParseError`] if the source is not a valid executable document.
+/// `parse` accepts executable documents only: operations and fragment
+/// definitions. Type-system definitions such as `type`, `schema`, and
+/// `directive` are out of scope and make the source invalid here.
+///
+/// # Errors
+///
+/// Returns a [`ParseError`] when the source is not a valid GraphQL executable
+/// document.
 ///
 /// ```
 /// use graphql_drop_unused_definitions::parse;
@@ -53,7 +67,7 @@ pub type Document = RawDocument<'static, String>;
 /// assert!(parse("query {").is_err());
 /// ```
 pub fn parse(source: &str) -> Result<Document, ParseError> {
-    graphql_parser::parse_query::<String>(source).map(|doc| doc.into_static())
+    graphql_parser::parse_query::<String>(source).map(RawDocument::into_static)
 }
 
 /// Render a [`Document`] back to GraphQL source.
@@ -73,16 +87,200 @@ pub fn parse(source: &str) -> Result<Document, ParseError> {
 /// let doc = parse("query { abc }").unwrap();
 /// assert_eq!(print(&doc), "{\n  abc\n}");
 /// ```
+#[must_use]
 pub fn print(document: &Document) -> String {
-    let normalized = Document {
-        definitions: document
-            .definitions
+    let mut definitions: Vec<_> = document
+        .definitions
+        .iter()
+        .cloned()
+        .map(shorthand_if_bare_query)
+        .collect();
+
+    // graphql-parser renders a string value that holds a newline as a block
+    // string, and its control-character escapes use decimal digits. Both
+    // diverge from canonical GraphQL printing. Swap each string value for a
+    // unique ASCII placeholder, then put the canonical rendering back after the
+    // structural print runs.
+    let mut strings = StringTable::default();
+    for definition in &mut definitions {
+        rewrite_strings_in_definition(definition, &mut strings);
+    }
+
+    let normalized = Document { definitions };
+    let mut rendered = format!("{normalized}").trim_end_matches('\n').to_string();
+    for (placeholder, original) in strings.entries() {
+        rendered = rendered.replace(&format!("\"{placeholder}\""), &canonical_string(original));
+    }
+    rendered
+}
+
+/// Placeholders standing in for string values during the structural print.
+///
+/// Each string value gets a fresh ASCII key with no characters that need
+/// escaping, so graphql-parser prints it verbatim inside quotes. After printing,
+/// each `"key"` is swapped for the canonical rendering of the value it stands
+/// for.
+#[derive(Default)]
+struct StringTable {
+    values: Vec<(String, String)>,
+}
+
+impl StringTable {
+    /// Reserve a placeholder for `value` and return it.
+    fn intern(&mut self, value: String) -> String {
+        let key = format!("__GQL_STRING_PLACEHOLDER_{}__", self.values.len());
+        self.values.push((key.clone(), value));
+        key
+    }
+
+    /// The placeholder/value pairs in reverse insertion order.
+    ///
+    /// Higher-indexed keys are substituted first so that `_0` does not match
+    /// inside `_10` during the replace pass.
+    fn entries(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.values
             .iter()
-            .cloned()
-            .map(shorthand_if_bare_query)
-            .collect(),
+            .rev()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+}
+
+/// Render a string value as a canonical single-line GraphQL string.
+///
+/// This matches graphql-js: wrap in double quotes, escape `"` and `\`, use the
+/// short forms for backspace, tab, newline, form feed, and carriage return, and
+/// use `\uXXXX` with uppercase hex for the other control characters. Every other
+/// character, including non-ASCII, is emitted as is.
+fn canonical_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{000C}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write;
+                write!(out, "\\u{:04X}", c as u32).expect("write to String is infallible");
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Replace every string value in a definition with an interned placeholder.
+fn rewrite_strings_in_definition(
+    definition: &mut Definition<'static, String>,
+    table: &mut StringTable,
+) {
+    match definition {
+        Definition::Operation(operation) => rewrite_strings_in_operation(operation, table),
+        Definition::Fragment(fragment) => {
+            for directive in &mut fragment.directives {
+                rewrite_strings_in_arguments(&mut directive.arguments, table);
+            }
+            rewrite_strings_in_selection_set(&mut fragment.selection_set, table);
+        }
+    }
+}
+
+fn rewrite_strings_in_operation(
+    operation: &mut OperationDefinition<'static, String>,
+    table: &mut StringTable,
+) {
+    let (variable_definitions, directives, selection_set) = match operation {
+        OperationDefinition::SelectionSet(set) => {
+            rewrite_strings_in_selection_set(set, table);
+            return;
+        }
+        OperationDefinition::Query(query) => (
+            &mut query.variable_definitions,
+            &mut query.directives,
+            &mut query.selection_set,
+        ),
+        OperationDefinition::Mutation(mutation) => (
+            &mut mutation.variable_definitions,
+            &mut mutation.directives,
+            &mut mutation.selection_set,
+        ),
+        OperationDefinition::Subscription(subscription) => (
+            &mut subscription.variable_definitions,
+            &mut subscription.directives,
+            &mut subscription.selection_set,
+        ),
     };
-    format!("{normalized}").trim_end_matches('\n').to_string()
+    for variable in variable_definitions {
+        if let Some(default) = &mut variable.default_value {
+            rewrite_strings_in_value(default, table);
+        }
+    }
+    for directive in directives {
+        rewrite_strings_in_arguments(&mut directive.arguments, table);
+    }
+    rewrite_strings_in_selection_set(selection_set, table);
+}
+
+fn rewrite_strings_in_selection_set(
+    selection_set: &mut SelectionSet<'static, String>,
+    table: &mut StringTable,
+) {
+    for selection in &mut selection_set.items {
+        match selection {
+            Selection::Field(field) => {
+                rewrite_strings_in_arguments(&mut field.arguments, table);
+                for directive in &mut field.directives {
+                    rewrite_strings_in_arguments(&mut directive.arguments, table);
+                }
+                rewrite_strings_in_selection_set(&mut field.selection_set, table);
+            }
+            Selection::InlineFragment(inline) => {
+                for directive in &mut inline.directives {
+                    rewrite_strings_in_arguments(&mut directive.arguments, table);
+                }
+                rewrite_strings_in_selection_set(&mut inline.selection_set, table);
+            }
+            Selection::FragmentSpread(spread) => {
+                for directive in &mut spread.directives {
+                    rewrite_strings_in_arguments(&mut directive.arguments, table);
+                }
+            }
+        }
+    }
+}
+
+fn rewrite_strings_in_arguments(
+    arguments: &mut [(String, Value<'static, String>)],
+    table: &mut StringTable,
+) {
+    for (_, value) in arguments {
+        rewrite_strings_in_value(value, table);
+    }
+}
+
+fn rewrite_strings_in_value(value: &mut Value<'static, String>, table: &mut StringTable) {
+    match value {
+        Value::String(text) => {
+            let placeholder = table.intern(std::mem::take(text));
+            *text = placeholder;
+        }
+        Value::List(items) => {
+            for item in items {
+                rewrite_strings_in_value(item, table);
+            }
+        }
+        Value::Object(fields) => {
+            for field in fields.values_mut() {
+                rewrite_strings_in_value(field, table);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Collapse a `query` with no name, variables, or directives into shorthand.
@@ -115,8 +313,8 @@ fn shorthand_if_bare_query(definition: Definition<'static, String>) -> Definitio
 /// keyed by the empty string, so pass `""` to select it.
 ///
 /// If no operation matches `operation_name`, the input document is returned
-/// unchanged, including any non executable definitions it holds. When two
-/// operations share a name, the later one in document order wins.
+/// unchanged. When two operations share a name, the later one in document order
+/// wins.
 ///
 /// ```
 /// use graphql_drop_unused_definitions::{drop_unused_definitions, parse, print};
@@ -127,6 +325,7 @@ fn shorthand_if_bare_query(definition: Definition<'static, String>) -> Definitio
 /// // Unknown name returns the whole document.
 /// assert_eq!(print(&drop_unused_definitions(&doc, "Nope")), print(&doc));
 /// ```
+#[must_use]
 pub fn drop_unused_definitions(ast: &Document, operation_name: &str) -> Document {
     match separate(ast, operation_name) {
         Some(doc) => doc,
@@ -153,21 +352,18 @@ fn separate(ast: &Document, operation_name: &str) -> Option<Document> {
     }
 
     // Walk operations in order. A later operation with the same name overwrites
-    // the earlier choice, matching last writer wins.
-    let mut chosen: Option<usize> = None;
+    // the earlier choice, matching last writer wins. Keep the node alongside its
+    // index so the filter can match by position and no second lookup is needed.
+    let mut chosen: Option<(usize, &OperationDefinition<'static, String>)> = None;
     for (index, definition) in ast.definitions.iter().enumerate() {
         if let Definition::Operation(operation) = definition {
             if name_of(operation) == operation_name {
-                chosen = Some(index);
+                chosen = Some((index, operation));
             }
         }
     }
 
-    let operation_index = chosen?;
-    let operation = match &ast.definitions[operation_index] {
-        Definition::Operation(operation) => operation,
-        Definition::Fragment(_) => unreachable!("index points at an operation"),
-    };
+    let (operation_index, operation) = chosen?;
 
     // Collect the transitive fragment closure reachable from this operation.
     let mut dependencies: HashSet<&str> = HashSet::new();
@@ -242,20 +438,22 @@ fn gather<'a>(selection_set: &'a SelectionSet<'static, String>, names: &mut Vec<
 
 /// Add `from` and everything it reaches to `collected`.
 ///
-/// The visited guard makes this terminate on cyclic fragment references. A name
-/// with no entry in `dep_graph`, such as a spread of an undefined fragment, is
-/// still added but contributes no children.
+/// The walk uses an explicit stack, so a long fragment chain cannot overflow the
+/// call stack. The visited guard makes it terminate on cyclic fragment
+/// references. A name with no entry in `dep_graph`, such as a spread of an
+/// undefined fragment, is still added but contributes no children.
 fn collect_transitive<'a>(
     collected: &mut HashSet<&'a str>,
     dep_graph: &HashMap<&'a str, Vec<&'a str>>,
     from: &'a str,
 ) {
-    if !collected.insert(from) {
-        return;
-    }
-    if let Some(deps) = dep_graph.get(from) {
-        for &dep in deps {
-            collect_transitive(collected, dep_graph, dep);
+    let mut stack = vec![from];
+    while let Some(name) = stack.pop() {
+        if !collected.insert(name) {
+            continue;
+        }
+        if let Some(deps) = dep_graph.get(name) {
+            stack.extend(deps.iter().copied());
         }
     }
 }
