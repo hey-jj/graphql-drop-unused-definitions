@@ -6,6 +6,8 @@ description = "prune unreachable GraphQL operation/fragment definitions for a ch
 license = "MIT"
 repository = "https://github.com/hey-jj/graphql-drop-unused-definitions"
 readme = "README.md"
+keywords = ["graphql", "query", "fragment", "ast", "prune"]
+categories = ["parsing", "web-programming", "development-tools"]
 
 [dependencies]
 # Parses GraphQL executable documents and renders them back. Its Display output
