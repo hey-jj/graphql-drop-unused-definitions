@@ -12,3 +12,6 @@ readme = "README.md"
 # matches the formatting the tests assert: two-space indent, blank line between
 # definitions, anonymous-operation shorthand.
 graphql-parser = "0.4"
+
+[dev-dependencies]
+proptest = "1.11.0"
