@@ -95,6 +95,16 @@ fn control_character_uses_uppercase_unicode_escape() {
 }
 
 #[test]
+fn del_and_c1_controls_are_escaped() {
+    // DEL (U+007F) and the C1 controls (U+0080-U+009F) have no short escape, so
+    // they print as backslash u with uppercase hex. The source carries the same
+    // escapes.
+    let doc = parse("query Q { f(a: \"x\\u007Fy\\u0080z\\u009Fw\") }").expect("input parses");
+    let out = print(&drop_unused_definitions(&doc, "Q"));
+    assert_eq!(out, "query Q {\n  f(a: \"x\\u007Fy\\u0080z\\u009Fw\")\n}");
+}
+
+#[test]
 fn string_value_matching_a_placeholder_token_is_preserved() {
     // A string value whose text equals an internal placeholder token must print
     // verbatim. The substitution pass must not rewrite it into another value.

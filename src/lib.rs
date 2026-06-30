@@ -174,7 +174,7 @@ fn canonical_string(value: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\u{000C}' => out.push_str("\\f"),
             '\r' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 => {
+            c if (c as u32) < 0x20 || (0x7F..=0x9F).contains(&(c as u32)) => {
                 use std::fmt::Write;
                 write!(out, "\\u{:04X}", c as u32).expect("write to String is infallible");
             }
