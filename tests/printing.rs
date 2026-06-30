@@ -95,6 +95,19 @@ fn control_character_uses_uppercase_unicode_escape() {
 }
 
 #[test]
+fn string_value_matching_a_placeholder_token_is_preserved() {
+    // A string value whose text equals an internal placeholder token must print
+    // verbatim. The substitution pass must not rewrite it into another value.
+    let doc = parse("query Q { f(a: \"hello\", b: \"__GQL_STRING_PLACEHOLDER_0__\") }")
+        .expect("input parses");
+    let out = print(&drop_unused_definitions(&doc, "Q"));
+    assert_eq!(
+        out,
+        "query Q {\n  f(a: \"hello\", b: \"__GQL_STRING_PLACEHOLDER_0__\")\n}"
+    );
+}
+
+#[test]
 fn block_string_decodes_to_the_same_value_as_a_plain_string() {
     // The parser strips block-string syntax during decode, so a block string and
     // the plain string with the same content are indistinguishable in the AST

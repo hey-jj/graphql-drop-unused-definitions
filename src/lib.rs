@@ -107,11 +107,23 @@ pub fn print(document: &Document) -> String {
     }
 
     let normalized = Document { definitions };
-    let mut rendered = format!("{normalized}").trim_end_matches('\n').to_string();
+    let rendered = format!("{normalized}").trim_end_matches('\n').to_string();
+
+    // Put the canonical renderings back in one forward pass. Placeholders print
+    // once and in interning order, so finding each in turn and never rescanning
+    // what was already written leaves a value whose own text equals a
+    // placeholder untouched.
+    let mut out = String::with_capacity(rendered.len());
+    let mut rest = rendered.as_str();
     for (placeholder, original) in strings.entries() {
-        rendered = rendered.replace(&format!("\"{placeholder}\""), &canonical_string(original));
+        let needle = format!("\"{placeholder}\"");
+        let pos = rest.find(&needle).expect("each placeholder prints once");
+        out.push_str(&rest[..pos]);
+        out.push_str(&canonical_string(original));
+        rest = &rest[pos + needle.len()..];
     }
-    rendered
+    out.push_str(rest);
+    out
 }
 
 /// Placeholders standing in for string values during the structural print.
@@ -133,14 +145,13 @@ impl StringTable {
         key
     }
 
-    /// The placeholder/value pairs in reverse insertion order.
+    /// The placeholder/value pairs in interning order.
     ///
-    /// Higher-indexed keys are substituted first so that `_0` does not match
-    /// inside `_10` during the replace pass.
+    /// Placeholders print in this order, so a single forward pass consumes each
+    /// one exactly once.
     fn entries(&self) -> impl Iterator<Item = (&str, &str)> {
         self.values
             .iter()
-            .rev()
             .map(|(key, value)| (key.as_str(), value.as_str()))
     }
 }
