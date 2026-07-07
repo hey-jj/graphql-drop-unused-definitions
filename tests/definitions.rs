@@ -32,6 +32,24 @@ fn duplicate_fragment_names_both_kept() {
 }
 
 #[test]
+fn duplicate_fragment_names_keep_all_reachable_spreads() {
+    let out = run(
+        "query Q { ...F }\n\
+         fragment F on Query { ...A }\n\
+         fragment F on Query { f }\n\
+         fragment A on Query { a }",
+        "Q",
+    );
+    assert_eq!(
+        out,
+        "query Q {\n  ...F\n}\n\n\
+         fragment F on Query {\n  ...A\n}\n\n\
+         fragment F on Query {\n  f\n}\n\n\
+         fragment A on Query {\n  a\n}",
+    );
+}
+
+#[test]
 fn fragment_defined_before_its_operation_is_reached() {
     // Output order follows source order, so the fragment prints before the
     // operation. Reachability does not depend on definition order.

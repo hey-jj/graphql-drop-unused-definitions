@@ -355,10 +355,10 @@ fn separate(ast: &Document, operation_name: &str) -> Option<Document> {
     let mut dep_graph: HashMap<&str, Vec<&str>> = HashMap::new();
     for definition in &ast.definitions {
         if let Definition::Fragment(fragment) = definition {
-            dep_graph.insert(
-                fragment.name.as_str(),
-                collect_spread_names(&fragment.selection_set),
-            );
+            dep_graph
+                .entry(fragment.name.as_str())
+                .or_default()
+                .extend(collect_spread_names(&fragment.selection_set));
         }
     }
 
